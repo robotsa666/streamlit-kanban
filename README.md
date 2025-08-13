@@ -1,4 +1,12 @@
-# Kanban v4 — React UI (streamlit-elements) + stabilny DnD
+# Kanban v4.4-react-multiline — multiline karty zadań
+
+Na kafelku widzisz teraz:
+1. **Tytuł**
+2. opis
+3. termin (ISO YYYY-MM-DD, jeśli ustawiony)
+4. `Priorytet: X`
+
+Wizualnie wymusiliśmy łamanie linii przez `white-space: pre-line`.
 
 ## Lokalnie
 ```bash
@@ -6,8 +14,5 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Deploy (Streamlit Community Cloud)
-- Wgraj pliki do publicznego repo na GitHub.
-- New app → wskaż repo/branch → main file: `app.py` → Deploy.
-
-W sidebarze: import/export JSON, dodawanie/edycja/usuwanie, zarządzanie kolumnami.
+## Deploy (Streamlit Cloud)
+Podmień pliki i zrób **New deployment**. W stopce zobaczysz `Build: v4.4-react-multiline`.

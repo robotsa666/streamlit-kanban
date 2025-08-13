@@ -23,19 +23,18 @@
   ],
   "tasks": {
     "t1": {
-      "title": "Zbadać wymagania UI",
-      "desc": "Lista ekranów, decyzje o kolorystyce.",
+      "title": "Landing page",
+      "desc": "Nagłówek, sekcja hero, CTA.",
       "priority": "High",
       "due": "2025-08-20",
       "tags": [
-        "ui",
-        "warsztat"
+        "ui"
       ],
       "done": false
     },
     "t2": {
-      "title": "Przygotować środowisko",
-      "desc": "Repo Git, konfiguracja Streamlit Cloud.",
+      "title": "Dev env",
+      "desc": "Repo + Streamlit Cloud",
       "priority": "Low",
       "due": "",
       "tags": [
@@ -44,8 +43,8 @@
       "done": false
     },
     "t3": {
-      "title": "Model danych",
-      "desc": "Pydantic + walidacja importu JSON.",
+      "title": "Modele danych",
+      "desc": "Pydantic + walidacja",
       "priority": "Med",
       "due": "2025-08-15",
       "tags": [
