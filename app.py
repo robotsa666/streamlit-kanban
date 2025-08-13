@@ -1,7 +1,9 @@
-# app.py
-# Streamlit Kanban: drag & drop między kolumnami (streamlit-sortables),
-# edycja/dodawanie/usuwanie zadań, filtry, import/export JSON.
-# Python 3.10+, Streamlit 1.33+, Pydantic v2.
+# app.py (v2)
+# Ulepszony layout + pewniejsze mapowanie DnD dla streamlit-sortables.
+# - Wyraźny panel DnD u góry (toggle)
+# - Karty z kompaktowym paskiem akcji
+# - Solidna obsługa różnych formatów zwrotu komponentu
+# - Naprawa styli w dark mode
 
 from __future__ import annotations
 
@@ -12,11 +14,7 @@ from typing import Literal, Optional
 
 import streamlit as st
 from pydantic import BaseModel, Field, field_validator, model_validator
-from streamlit_sortables import sort_items  # DnD komponent
-
-# ==========
-# MODELE (Pydantic v2) + WALIDACJA
-# ==========
+from streamlit_sortables import sort_items
 
 Priority = Literal["Low", "Med", "High"]
 
@@ -52,27 +50,21 @@ class Board(BaseModel):
     @model_validator(mode="after")
     def check_references(self):
         task_keys = set(self.tasks.keys())
-        col_ids = set()
+        seen = set()
         for col in self.columns:
-            if col.id in col_ids:
+            if col.id in seen:
                 raise ValueError(f"Duplicate column id '{col.id}'.")
-            col_ids.add(col.id)
+            seen.add(col.id)
             for tid in col.task_ids:
                 if tid not in task_keys:
-                    raise ValueError(
-                        f"Task id '{tid}' referenced by column '{col.name}' not found in tasks."
-                    )
-        # osierocone zadania -> dopnij do pierwszej kolumny
+                    raise ValueError(f"Task id '{tid}' in column '{col.name}' not found.")
+        # dopnij osierocone do pierwszej kolumny
         assigned = {tid for c in self.columns for tid in c.task_ids}
         orphans = set(self.tasks.keys()) - assigned
         if orphans and self.columns:
             self.columns[0].task_ids.extend(sorted(list(orphans)))
         return self
 
-
-# ==========
-# STAN / INICJALIZACJA
-# ==========
 
 DEFAULT_BOARD = Board(
     columns=[
@@ -97,10 +89,6 @@ def save_board(board: Board):
 def next_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
-
-# ==========
-# OPERACJE NA MODELU
-# ==========
 
 def add_task(column_id: str, t: Task) -> str:
     board = get_board()
@@ -170,36 +158,6 @@ def delete_column(column_id: str, move_tasks_to: Optional[str] = None):
     save_board(board)
 
 
-def move_task_lists_from_sortables(sorted_items) -> bool:
-    """
-    Przyjmuje wynik z streamlit-sortables (multi_containers=True)
-    i aktualizuje kolejność oraz przypisanie zadań w kolumnach.
-    Zwraca True, jeżeli nastąpiła zmiana.
-    """
-    if not sorted_items:
-        return False
-
-    board = get_board()
-    changed = False
-    for i, col in enumerate(board.columns):
-        try:
-            items = sorted_items[i]["items"]
-        except Exception:
-            items = sorted_items[i]
-        new_order = [s.split("::", 1)[0] for s in items]
-        if new_order != col.task_ids:
-            col.task_ids = new_order
-            changed = True
-
-    if changed:
-        save_board(board)
-    return changed
-
-
-# ==========
-# WIDOK / POMOCNICZE
-# ==========
-
 PRIO_EMOJI = {"High": "🟥", "Med": "🟧", "Low": "🟩"}
 
 
@@ -249,61 +207,59 @@ def import_json_uploader():
 
 def render_task_card(tid: str, t: Task):
     color = {"High": "#ef4444", "Med": "#f59e0b", "Low": "#10b981"}[t.priority]
-    with st.container(border=True):
-        st.markdown(
-            f"""
-            <div style="border-left:6px solid {color}; padding-left:10px;">
-              <div style="font-weight:600;">{t.title}</div>
-              <div style="font-size:0.9rem; opacity:0.9;">{t.desc or ""}</div>
-              <div style="font-size:0.85rem; margin-top:4px;">
-                <span>Priorytet: <b>{t.priority}</b></span>
+    # karta
+    st.markdown(
+        f"""
+        <div style="border-radius:10px;border:1px solid var(--secondary-background-color,#2b2b2b);
+                    background: var(--background-color, #111); padding:10px; margin-bottom:10px;">
+          <div style="display:flex; gap:10px;">
+            <div style="width:5px; background:{color}; border-radius:4px;"></div>
+            <div style="flex:1;">
+              <div style="font-weight:700;">{t.title}</div>
+              <div style="opacity:.9; font-size:.95rem;">{t.desc or ""}</div>
+              <div style="font-size:.85rem; margin-top:4px; opacity:.9;">
+                <b>Priorytet:</b> {t.priority}
                 {' · ⏰ ' + t.due.isoformat() if t.due else ''}
                 {' · ' + ' '.join(f'#'+x for x in t.tags) if t.tags else ''}
               </div>
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        cols = st.columns([1, 1, 2, 2])
-        if cols[0].button("✏️ Edytuj", key=f"edit-{tid}", use_container_width=True):
-            st.session_state.edit_task_id = tid
-            st.rerun()
-        if cols[1].button("🗑️ Usuń", key=f"del-{tid}", use_container_width=True):
-            delete_task(tid)
-            st.success("Usunięto zadanie.")
-            st.rerun()
-        new_done = cols[2].toggle("Done", value=t.done, key=f"donechk-{tid}")
-        if new_done != t.done:
-            edit_task(tid, {"done": new_done})
-            st.rerun()
-        new_prio = cols[3].selectbox(
-            "Priorytet",
-            options=["Low", "Med", "High"],
-            index=["Low", "Med", "High"].index(t.priority),
-            key=f"prio-{tid}",
-        )
-        if new_prio != t.priority:
-            edit_task(tid, {"priority": new_prio})
-            st.rerun()
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    # pasek akcji (kompaktowy)
+    c1, c2, c3, c4 = st.columns([1, 1, 2, 2])
+    if c1.button("✏️", key=f"edit-{tid}", help="Edytuj"):
+        st.session_state.edit_task_id = tid
+        st.rerun()
+    if c2.button("🗑️", key=f"del-{tid}", help="Usuń"):
+        delete_task(tid)
+        st.success("Usunięto zadanie.")
+        st.rerun()
+    new_done = c3.toggle("Done", value=t.done, key=f"done-{tid}")
+    if new_done != t.done:
+        edit_task(tid, {"done": new_done})
+        st.rerun()
+    new_prio = c4.selectbox("Priorytet", ["Low", "Med", "High"], index=["Low", "Med", "High"].index(t.priority), key=f"prio-{tid}")
+    if new_prio != t.priority:
+        edit_task(tid, {"priority": new_prio})
+        st.rerun()
 
-
-# ==========
-# UI: DIALOGI (formularze w modalach)
-# ==========
 
 def show_add_task_dialog():
     @st.dialog("Dodaj zadanie", width="large")
     def _dlg():
         board = get_board()
         with st.form("add_task_form", clear_on_submit=False):
-            cols = st.columns(2)
-            title = cols[0].text_input("Tytuł*", placeholder="Nazwa zadania")
-            priority = cols[1].selectbox("Priorytet", ["Low", "Med", "High"], index=1)
+            c = st.columns(2)
+            title = c[0].text_input("Tytuł*", placeholder="Nazwa zadania")
+            priority = c[1].selectbox("Priorytet", ["Low", "Med", "High"], index=1)
             desc = st.text_area("Opis", placeholder="Krótki opis...")
-            cols2 = st.columns(2)
-            due_enabled = cols2[0].checkbox("Ustaw termin")
-            due_val = cols2[0].date_input("Termin", value=date.today(), disabled=not due_enabled)
-            tags_txt = cols2[1].text_input("Tagi (rozdziel przecinkami)", placeholder="ops, ui, backend")
+            c2 = st.columns(2)
+            due_enabled = c2[0].checkbox("Ustaw termin")
+            due_val = c2[0].date_input("Termin", value=date.today(), disabled=not due_enabled)
+            tags_txt = c2[1].text_input("Tagi (rozdziel przecinkami)", placeholder="ops, ui, backend")
             col_map = {c.name: c.id for c in board.columns}
             column_id = st.selectbox("Kolumna docelowa", options=list(col_map.keys()))
             submitted = st.form_submit_button("➕ Dodaj", use_container_width=True)
@@ -317,7 +273,6 @@ def show_add_task_dialog():
                 add_task(col_map[column_id], task)
                 st.success("Dodano zadanie.")
                 st.rerun()
-
     _dlg()
 
 
@@ -327,14 +282,14 @@ def show_edit_task_dialog(task_id: str):
         board = get_board()
         t = board.tasks[task_id]
         with st.form("edit_task_form"):
-            cols = st.columns(2)
-            title = cols[0].text_input("Tytuł*", value=t.title)
-            priority = cols[1].selectbox("Priorytet", ["Low", "Med", "High"], index=["Low", "Med", "High"].index(t.priority))
+            c = st.columns(2)
+            title = c[0].text_input("Tytuł*", value=t.title)
+            priority = c[1].selectbox("Priorytet", ["Low", "Med", "High"], index=["Low", "Med", "High"].index(t.priority))
             desc = st.text_area("Opis", value=t.desc)
-            cols2 = st.columns(2)
-            due_enabled = cols2[0].checkbox("Ustaw termin", value=t.due is not None)
-            due_val = cols2[0].date_input("Termin", value=(t.due or date.today()), disabled=not due_enabled)
-            tags_txt = cols2[1].text_input("Tagi (rozdziel przecinkami)", value=", ".join(t.tags))
+            c2 = st.columns(2)
+            due_enabled = c2[0].checkbox("Ustaw termin", value=t.due is not None)
+            due_val = c2[0].date_input("Termin", value=(t.due or date.today()), disabled=not due_enabled)
+            tags_txt = c2[1].text_input("Tagi (rozdziel przecinkami)", value=", ".join(t.tags))
             col_map = {c.name: c.id for c in board.columns}
             current_col_id = next((c.id for c in board.columns if task_id in c.task_ids), board.columns[0].id)
             col_names = list(col_map.keys())
@@ -361,24 +316,23 @@ def show_edit_task_dialog(task_id: str):
                     save_board(board2)
                 st.success("Zapisano zmiany.")
                 st.rerun()
-
     _dlg()
 
 
-# ==========
-# APLIKACJA
-# ==========
+# ======== APP ========
 
 st.set_page_config(page_title="Kanban – Streamlit", page_icon="🗂️", layout="wide")
 
+# Naprawy stylu (dark mode + zwarta typografia)
 st.markdown(
     """
     <style>
-      .block-container { padding-top: 1rem; }
-      .sortable-component { background: transparent; }
-      .sortable-container { background: #fafafa; border-radius: 8px; padding: 8px; }
-      .sortable-container-header { font-weight: 700; margin-bottom: 4px; }
-      .sortable-item { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 6px 8px; margin: 6px 0; }
+      .block-container { padding-top: 0.8rem; }
+      .stDialog .stButton>button { width: 100%; }
+      /* Sortables wygląd */
+      .sortable-container { background: rgba(127,127,127,0.08); border-radius: 10px; padding: 10px; }
+      .sortable-item { background: var(--background-color); border: 1px solid rgba(127,127,127,0.35);
+                       border-radius: 8px; padding: 6px 10px; margin: 6px 0; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -386,7 +340,7 @@ st.markdown(
 
 board = get_board()
 
-# Sidebar: Filtry, Import/Export, Kolumny, Dodaj zadanie
+# Sidebar: Filtry + IO + Kolumny
 st.sidebar.header("🔎 Filtry")
 title_filter = st.sidebar.text_input("Tytuł zawiera…", placeholder="np. raport")
 prio_filter = st.sidebar.multiselect("Priorytet", options=["Low", "Med", "High"])
@@ -428,11 +382,7 @@ with st.sidebar.expander("Usuń kolumnę"):
     if col_opts2:
         del_name = st.selectbox("Kolumna do usunięcia", options=list(col_opts2.keys()), key="del_col_sel")
         others = [(c.name, c.id) for c in board.columns if c.name != del_name]
-        tgt_name = st.selectbox(
-            "Przenieś zadania do… (opcjonalnie, gdy kolumna nie jest pusta)",
-            options=["—"] + [n for n, _ in others],
-            key="move_to_sel",
-        )
+        tgt_name = st.selectbox("Przenieś zadania do…", options=["—"] + [n for n, _ in others], key="move_to_sel")
         confirm = st.checkbox("Potwierdzam usunięcie")
         if st.button("🗑️ Usuń kolumnę", use_container_width=True, disabled=not confirm):
             move_to = None
@@ -445,60 +395,74 @@ st.sidebar.divider()
 if st.sidebar.button("➕ Dodaj zadanie", use_container_width=True):
     show_add_task_dialog()
 
-if st.session_state.get("edit_task_id"):
-    show_edit_task_dialog(st.session_state.pop("edit_task_id"))
+# DnD panel (toggle widoczności, domyślnie włączony)
+with st.container():
+    st.subheader("🔁 Ułóż zadania (Drag & Drop)")
+    show_dnd = st.toggle("Pokaż obszar przeciągania", value=True)
+    if show_dnd:
+        # przygotuj strukturę wejściową
+        sortable_input = []
+        for col in board.columns:
+            items = [f"{tid}::{label_for(tid, board.tasks[tid])}" for tid in col.task_ids if tid in board.tasks]
+            sortable_input.append({"header": col.name, "items": items})
 
-# ==========
-# DRAG & DROP – sterowanie kolejnością / kolumnami
-# ==========
+        # DnD
+        sorted_items = sort_items(
+            sortable_input,
+            multi_containers=True,
+            direction="vertical",
+            key="kanban-sortables",
+        )
 
-st.subheader("🖱️ Przeciągnij i upuść, aby zmienić kolejność / kolumnę")
+        # Normalizacja struktury zwrotnej (różne wersje komponentu)
+        def _extract_list(container_result):
+            if isinstance(container_result, dict) and "items" in container_result:
+                return container_result["items"]
+            if isinstance(container_result, list):
+                return container_result
+            # fallback na inne klucze, jeśli kiedyś się pojawią
+            for k in ("order", "values"):
+                if isinstance(container_result, dict) and k in container_result:
+                    return container_result[k]
+            return []
 
-sortable_input = []
-for col in board.columns:
-    items = []
-    for tid in col.task_ids:
-        t = board.tasks.get(tid)
-        if not t:
-            continue
-        items.append(f"{tid}::{label_for(tid, t)}")
-    sortable_input.append({"header": col.name, "items": items})
-
-sorted_items = sort_items(
-    sortable_input,
-    multi_containers=True,
-    direction="vertical",
-    key="kanban-sortables",
-)
-
-if move_task_lists_from_sortables(sorted_items):
-    st.toast("Zaktualizowano układ zadań.")
-    st.rerun()
+        if sorted_items is not None:
+            normalized = [_extract_list(c) for c in sorted_items]
+            # przemapuj na task_ids
+            changed = False
+            board2 = get_board()
+            for i, col in enumerate(board2.columns):
+                new_ids = [s.split("::", 1)[0] for s in (normalized[i] if i < len(normalized) else [])]
+                if new_ids != col.task_ids:
+                    col.task_ids = new_ids
+                    changed = True
+            if changed:
+                save_board(board2)
+                st.toast("Zaktualizowano układ zadań.")
+                st.rerun()
 
 st.divider()
 
-# ==========
-# WIDOK KOLUMN Z KARTAMI (z filtrami)
-# ==========
-
+# Widok kanban (filtry) – responsywny: 1–3 kolumny
 st.subheader("📋 Tablica Kanban")
-
 match_ids = apply_filters(board.tasks, title_filter, prio_filter, tags_filter)
 
-cols = st.columns(max(1, min(3, len(board.columns))))
+num_cols = 3 if len(board.columns) >= 3 else len(board.columns) or 1
+cols = st.columns(num_cols)
 for i, col in enumerate(board.columns):
-    with cols[i % len(cols)]:
-        st.markdown(f"**{col.name}**  \n<small>{len(col.task_ids)} zadań</small>", unsafe_allow_html=True)
+    with cols[i % num_cols]:
+        st.markdown(f"### {col.name}")
+        st.caption(f"{len(col.task_ids)} zadań")
         for tid in col.task_ids:
             if tid in match_ids:
                 render_task_card(tid, board.tasks[tid])
-        st.caption(" ")
+        st.write("")  # spacing
 
 with st.expander("ℹ️ Wskazówki"):
     st.markdown(
         """
-- Drag & drop działa w górnym szarym obszarze („Przeciągnij i upuść…”).
-- Filtry zawężają widok kart **poniżej**, ale nie wpływają na DnD (żeby nie gubić elementów).
-- Import JSON **zastępuje** bieżącą tablicę. Eksport JSON służy do snapshotów stanu.
+- Drag & drop działa w górnym panelu „Ułóż zadania (Drag & Drop)”.  
+- Filtry wpływają na widok kart, nie na panel DnD (dla spójności układu).  
+- Import JSON zastępuje bieżący stan; Export JSON pobiera kopię tablicy.
         """
     )
