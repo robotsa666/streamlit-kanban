@@ -1,13 +1,14 @@
-# app.py (v3.1)
-# - Drag&Drop bezpośrednio na kartach (streamlit-sortables)
-# - Naprawa: Import JSON nie zapętla się (reset file_uploader po imporcie)
-# - Stabilniejsze dodawanie zadań (clear_on_submit + stałe klucze)
+# app.py (v3.3)
+# - Keyed DnD component by board hash -> natychmiastowy refresh listy po dodaniu/importowaniu
+# - Stabilny formularz dodawania w sidebarze
+# - Import JSON z resetem file_uploader
 # - Smukły layout
 
 from __future__ import annotations
 
 import json
 import uuid
+import hashlib
 from datetime import date
 from typing import Literal, Optional
 
@@ -185,7 +186,6 @@ def export_json_button(board: Board):
 
 
 def import_json_uploader():
-    # Używamy tokenu w kluczu, aby po udanym imporcie zresetować widget i uniknąć pętli
     token = st.session_state.get("_import_token", "0")
     up = st.file_uploader("Import JSON (zastąpi bieżącą tablicę)", type=["json"], key=f"import_{token}")
     if up is not None:
@@ -194,83 +194,10 @@ def import_json_uploader():
             board = Board(**raw)
             save_board(board)
             st.success("Zaimportowano tablicę.")
-            # reset file_uploader (nowy klucz)
             st.session_state["_import_token"] = next_id("tok")
             st.rerun()
         except Exception as e:
             st.error(f"Błąd walidacji importu: {e}")
-
-
-def show_add_task_dialog():
-    @st.dialog("Dodaj zadanie", width="large")
-    def _dlg():
-        board = get_board()
-        with st.form("add_task_form", clear_on_submit=True):
-            c = st.columns(2)
-            title = c[0].text_input("Tytuł*", placeholder="Nazwa zadania", key="add_title")
-            priority = c[1].selectbox("Priorytet", ["Low", "Med", "High"], index=1, key="add_priority")
-            desc = st.text_area("Opis", placeholder="Krótki opis...", key="add_desc")
-            c2 = st.columns(2)
-            due_enabled = c2[0].checkbox("Ustaw termin", key="add_due_enabled")
-            due_val = c2[0].date_input("Termin", value=date.today(), disabled=not due_enabled, key="add_due_val")
-            tags_txt = c2[1].text_input("Tagi (rozdziel przecinkami)", placeholder="ops, ui, backend", key="add_tags")
-            col_map = {c.name: c.id for c in board.columns}
-            column_id = st.selectbox("Kolumna docelowa", options=list(col_map.keys()), key="add_column")
-            submitted = st.form_submit_button("➕ Dodaj", use_container_width=True)
-            if submitted:
-                if not title or not title.strip():
-                    st.error("Tytuł jest wymagany.")
-                    return
-                tags = [t.strip() for t in tags_txt.split(",") if t.strip()]
-                due = due_val if due_enabled else None
-                task = Task(title=title.strip(), desc=(desc or "").strip(), priority=priority, due=due, tags=tags)
-                add_task(col_map[column_id], task)
-                st.success("Dodano zadanie.")
-                st.rerun()
-    _dlg()
-
-
-def show_edit_task_dialog(task_id: str):
-    @st.dialog("Edytuj zadanie", width="large")
-    def _dlg():
-        board = get_board()
-        t = board.tasks[task_id]
-        with st.form("edit_task_form", clear_on_submit=True):
-            c = st.columns(2)
-            title = c[0].text_input("Tytuł*", value=t.title, key=f"edit_title_{task_id}")
-            priority = c[1].selectbox("Priorytet", ["Low", "Med", "High"], index=["Low", "Med", "High"].index(t.priority), key=f"edit_prio_{task_id}")
-            desc = st.text_area("Opis", value=t.desc, key=f"edit_desc_{task_id}")
-            c2 = st.columns(2)
-            due_enabled = c2[0].checkbox("Ustaw termin", value=t.due is not None, key=f"edit_due_enabled_{task_id}")
-            due_val = c2[0].date_input("Termin", value=(t.due or date.today()), disabled=not due_enabled, key=f"edit_due_val_{task_id}")
-            tags_txt = c2[1].text_input("Tagi (rozdziel przecinkami)", value=", ".join(t.tags), key=f"edit_tags_{task_id}")
-            col_map = {c.name: c.id for c in board.columns}
-            current_col_id = next((c.id for c in board.columns if task_id in c.task_ids), board.columns[0].id)
-            col_names = list(col_map.keys())
-            current_col_name = next(name for name, cid in col_map.items() if cid == current_col_id)
-            new_col_name = st.selectbox("Kolumna", options=col_names, index=col_names.index(current_col_name), key=f"edit_col_{task_id}")
-
-            submitted = st.form_submit_button("💾 Zapisz", use_container_width=True)
-            if submitted:
-                if not title or not title.strip():
-                    st.error("Tytuł jest wymagany.")
-                    return
-                tags = [t.strip() for t in tags_txt.split(",") if t.strip()]
-                due = due_val if due_enabled else None
-                edit_task(task_id, {"title": title.strip(), "desc": (desc or '').strip(), "priority": priority, "due": due, "tags": tags})
-                new_col_id = col_map[new_col_name]
-                if new_col_id != current_col_id:
-                    board2 = get_board()
-                    for c in board2.columns:
-                        if task_id in c.task_ids:
-                            c.task_ids.remove(task_id)
-                    for c in board2.columns:
-                        if c.id == new_col_id:
-                            c.task_ids.append(task_id)
-                    save_board(board2)
-                st.success("Zapisano zmiany.")
-                st.rerun()
-    _dlg()
 
 
 # ===== APP =====
@@ -292,7 +219,7 @@ st.markdown(
 
 board = get_board()
 
-# Sidebar
+# Sidebar: Filtry
 st.sidebar.header("🔎 Filtry")
 title_filter = st.sidebar.text_input("Tytuł zawiera…", placeholder="np. raport")
 prio_filter = st.sidebar.multiselect("Priorytet", options=["Low", "Med", "High"])
@@ -343,11 +270,36 @@ with st.sidebar.expander("Usuń kolumnę"):
             delete_column(col_opts2[del_name], move_to)
             st.rerun()
 
+# ===== Dodawanie zadań w sidebarze =====
 st.sidebar.divider()
-if st.sidebar.button("➕ Dodaj zadanie", use_container_width=True):
-    show_add_task_dialog()
+st.sidebar.header("➕ Dodaj zadanie")
+with st.sidebar.form("add_task_form_sidebar", clear_on_submit=True):
+    c = st.columns(2)
+    add_title = c[0].text_input("Tytuł*", placeholder="Nazwa zadania", key="sb_add_title")
+    add_prio = c[1].selectbox("Priorytet", ["Low", "Med", "High"], index=1, key="sb_add_priority")
+    add_desc = st.text_area("Opis", placeholder="Krótki opis...", key="sb_add_desc")
+    c2 = st.columns(2)
+    add_due_enabled = c2[0].checkbox("Ustaw termin", key="sb_add_due_enabled")
+    add_due_val = c2[0].date_input("Termin", value=date.today(), disabled=not add_due_enabled, key="sb_add_due_val")
+    add_tags_txt = c2[1].text_input("Tagi (rozdziel przecinkami)", placeholder="ops, ui, backend", key="sb_add_tags")
+    col_map = {c.name: c.id for c in board.columns}
+    add_colname = st.selectbox("Kolumna docelowa", options=list(col_map.keys()) if col_map else [], key="sb_add_col")
+    sb_submitted = st.form_submit_button("Dodaj", use_container_width=True)
+    if sb_submitted:
+        if not add_title or not add_title.strip():
+            st.error("Tytuł jest wymagany.")
+        elif not col_map:
+            st.error("Brak kolumn. Dodaj najpierw kolumnę w sekcji 'Kolumny'.")
+        else:
+            tags = [t.strip() for t in add_tags_txt.split(",") if t.strip()]
+            due = add_due_val if add_due_enabled else None
+            task = Task(title=add_title.strip(), desc=(add_desc or "").strip(), priority=add_prio, due=due, tags=tags)
+            add_task(col_map[add_colname], task)
+            st.session_state["_force_refresh"] = uuid.uuid4().hex  # opcjonalny "pstryczek" do key
+            st.success("Dodano zadanie.")
+            st.rerun()
 
-# Edycja/Usuwanie/Done
+# ===== Edycja/Usuwanie/Done =====
 with st.sidebar.expander("🛠️ Edycja/Usuwanie zadania"):
     task_choices = []
     for c in board.columns:
@@ -372,9 +324,45 @@ with st.sidebar.expander("🛠️ Edycja/Usuwanie zadania"):
             st.rerun()
 
 if st.session_state.get("edit_task_id"):
-    show_edit_task_dialog(st.session_state.pop("edit_task_id"))
+    t = get_board().tasks[st.session_state["edit_task_id"]]
+    with st.sidebar.expander("✏️ Edytuj wybrane zadanie", expanded=True):
+        with st.form(f"edit_task_form_sb", clear_on_submit=True):
+            ec = st.columns(2)
+            etitle = ec[0].text_input("Tytuł*", value=t.title)
+            eprio = ec[1].selectbox("Priorytet", ["Low", "Med", "High"], index=["Low", "Med", "High"].index(t.priority))
+            edesc = st.text_area("Opis", value=t.desc)
+            ec2 = st.columns(2)
+            edue_en = ec2[0].checkbox("Ustaw termin", value=t.due is not None)
+            edue_val = ec2[0].date_input("Termin", value=(t.due or date.today()), disabled=not edue_en)
+            etags_txt = ec2[1].text_input("Tagi (rozdziel przecinkami)", value=", ".join(t.tags))
+            col_map2 = {c.name: c.id for c in get_board().columns}
+            current_col_id = next((c.id for c in get_board().columns if st.session_state["edit_task_id"] in c.task_ids), get_board().columns[0].id)
+            col_names2 = list(col_map2.keys())
+            current_col_name = next(name for name, cid in col_map2.items() if cid == current_col_id)
+            ecolname = st.selectbox("Kolumna", options=col_names2, index=col_names2.index(current_col_name))
+            esub = st.form_submit_button("Zapisz", use_container_width=True)
+            if esub:
+                if not etitle.strip():
+                    st.error("Tytuł jest wymagany.")
+                else:
+                    etags = [x.strip() for x in etags_txt.split(",") if x.strip()]
+                    edue = edue_val if edue_en else None
+                    edit_task(st.session_state["edit_task_id"], {"title": etitle.strip(), "desc": edesc.strip(), "priority": eprio, "due": edue, "tags": etags})
+                    new_col_id = col_map2[ecolname]
+                    if new_col_id != current_col_id:
+                        b2 = get_board()
+                        for c in b2.columns:
+                            if st.session_state["edit_task_id"] in c.task_ids:
+                                c.task_ids.remove(st.session_state["edit_task_id"])
+                        for c in b2.columns:
+                            if c.id == new_col_id:
+                                c.task_ids.append(st.session_state["edit_task_id"])
+                        save_board(b2)
+                    st.success("Zapisano zmiany.")
+                    st.session_state.pop("edit_task_id", None)
+                    st.rerun()
 
-# ====== Board DnD ======
+# ===== Główna tablica DnD (klucz = hash stanu) =====
 
 st.subheader("📋 Tablica Kanban")
 
@@ -393,9 +381,16 @@ for col in board.columns:
             continue
         label = item_label(tid, t) if pass_filter(t) else f"⏸️ (ukryte filtrem) {t.title}"
         items.append(f"{tid}::{label}")
-    containers.append({"header": f"{col.name}", "items": items})
+    containers.append({"header": f"{col.name}  ({len(items)})", "items": items})
 
-result = sort_items(containers, multi_containers=True, direction="vertical", key="kanban-main")
+# Wylicz hash stanu tablicy (zmieni się po dodaniu/imp., więc component key też)
+board_json = json.dumps(board.model_dump(mode="json"), sort_keys=True)
+board_hash = hashlib.md5(board_json.encode("utf-8")).hexdigest()[:8]
+extra_rev = st.session_state.get("_force_refresh", "")
+comp_key = f"kanban-main-{board_hash}-{extra_rev}"
+
+# Render DnD
+result = sort_items(containers, multi_containers=True, direction="vertical", key=comp_key)
 
 def _extract_items(container_result):
     if container_result is None:
@@ -420,14 +415,10 @@ if result is not None:
             changed = True
     if changed:
         save_board(board2)
-        st.toast("Zaktualizowano układ zadań.")
         st.rerun()
 
-with st.expander("ℹ️ Wskazówki"):
-    st.markdown(
-        """
-- Przeciągaj **kartę** między kolumnami / w obrębie kolumny.
-- Edycja/Usuwanie/Done jest w **sidebarze** (karty są smukłe do DnD).
-- Import JSON zastępuje stan. Export JSON pobiera kopię tablicy.
-        """
-    )
+# Force refresh button (na wszelki wypadek)
+st.caption("Jeśli nie widzisz nowych kart po dodaniu/importowaniu:")
+if st.button("🔄 Odśwież widok"):
+    st.session_state["_force_refresh"] = uuid.uuid4().hex
+    st.rerun()
