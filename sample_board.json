@@ -1,0 +1,57 @@
+{
+  "columns": [
+    {
+      "id": "todo",
+      "name": "Do zrobienia",
+      "task_ids": [
+        "t1",
+        "t2"
+      ]
+    },
+    {
+      "id": "inprog",
+      "name": "W trakcie",
+      "task_ids": [
+        "t3"
+      ]
+    },
+    {
+      "id": "done",
+      "name": "Zrobione",
+      "task_ids": []
+    }
+  ],
+  "tasks": {
+    "t1": {
+      "title": "Zbadać wymagania UI",
+      "desc": "Lista ekranów, decyzje o kolorystyce.",
+      "priority": "High",
+      "due": "2025-08-20",
+      "tags": [
+        "ui",
+        "warsztat"
+      ],
+      "done": false
+    },
+    "t2": {
+      "title": "Przygotować środowisko",
+      "desc": "Repo Git, konfiguracja Streamlit Cloud.",
+      "priority": "Low",
+      "due": "",
+      "tags": [
+        "ops"
+      ],
+      "done": false
+    },
+    "t3": {
+      "title": "Model danych",
+      "desc": "Pydantic + walidacja importu JSON.",
+      "priority": "Med",
+      "due": "2025-08-15",
+      "tags": [
+        "backend"
+      ],
+      "done": true
+    }
+  }
+}
