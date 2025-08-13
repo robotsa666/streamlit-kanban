@@ -1,41 +1,55 @@
-# app.py — Kanban (React UI + smooth DnD + Supabase persist)
-# Wersja: v5.0-supabase
+# app.py — Kanban (React UI + smooth DnD + Supabase persist + 4-linie na karcie)
+# Wersja: v5.2-supabase-multiline
 # - Drag & drop: streamlit-sortables (stabilny klucz, bez zbędnych rerunów)
-# - Karty: wielolinijkowe (tytuł / opis / data / priorytet)
-# - Persistencja: Supabase (PostgreSQL, JSONB) + fallback do session_state,
-#   sekrety ustaw w Streamlit: SUPABASE_URL, SUPABASE_KEY, opcj. BOARD_ID="main"
+# - Karty: 4 linie dokładnie: <tytuł>\n<opis>\n<data>\n<Priorytet: X>
+# - ID zadania NIE jest pokazywane na kafelku (ukryty separator), ale DnD działa
+# - Persistencja: Supabase (PostgreSQL JSONB) + fallback do session_state
+# - Sekrety w Streamlit: SUPABASE_URL, SUPABASE_KEY, opcj. BOARD_ID, SUPABASE_TABLE
+#
+# SQL (domyślna tabela "boards"):
+#   create table if not exists public.boards (
+#     id text primary key,
+#     data jsonb not null,
+#     updated_at timestamptz not null default now()
+#   );
+#   alter table public.boards enable row level security;
+#   create policy "boards_read_all"   on public.boards for select using (true);
+#   create policy "boards_write_all"  on public.boards for insert with check (true);
+#   create policy "boards_update_all" on public.boards for update using (true) with check (true);
 
 from __future__ import annotations
 
 import json
-import hashlib
 from datetime import date, datetime
 from typing import Literal, Optional
 
 import streamlit as st
 from pydantic import BaseModel, Field, field_validator, model_validator
 from streamlit_sortables import sort_items
-from streamlit_elements import elements, mui  # tylko nagłówki/typografia
+from streamlit_elements import elements, mui  # tylko nagłówek/typografia
 
 # --- KONFIG / BUILD TAG ---
-BUILD_TAG = "v5.0-supabase"
+BUILD_TAG = "v5.2-supabase-multiline"
 REV_KEY = "_view_rev"  # zwiększamy PRZY dodawaniu/import/zmianie kolumn; NIE przy DnD
-TABLE_NAME = "boards"  # tabela w Supabase: id (text, PK), data (jsonb), updated_at (timestamptz)
 
-# ====== PERSIST: Supabase (fallback do session_state, jeśli brak sekretów) ======
+# ╔════════════════════════════════════════════════════════════════╗
+# ║                   SUPABASE – pomocnicze funkcje                ║
+# ╚════════════════════════════════════════════════════════════════╝
+def _sb_table_name() -> str:
+    return st.secrets.get("SUPABASE_TABLE", "boards")
+
+
 def _sb_client():
-    """Zwraca klienta Supabase (v2) lub None (gdy brak sekretów/klienta)."""
+    """Zwraca klienta Supabase (v2) lub None (gdy brak pakietu/sektetów)."""
     try:
         from supabase import create_client  # wymagane: supabase>=2.5.0
-    except Exception as e:
+    except Exception:
         # biblioteka nie zainstalowana – użyjemy wyłącznie session_state
-        st.warning("Supabase klient niedostępny (brak pakietu?). Używam tylko session_state.")
         return None
 
     url = st.secrets.get("SUPABASE_URL")
     key = st.secrets.get("SUPABASE_KEY")
     if not url or not key:
-        # brak sekretów – pracujemy tylko na session_state
         return None
     try:
         return create_client(url, key)
@@ -48,23 +62,38 @@ def _board_id() -> str:
     return st.secrets.get("BOARD_ID", "main")
 
 
-def db_load_board() -> dict | None:
-    """Wczytuje słownik stanu z Supabase. Gdy brak wiersza – wstawi domyślną tablicę."""
+def db_load_board_default_insert(default_payload: dict) -> dict | None:
+    """Wczytuje słownik stanu z Supabase, a gdy brak – tworzy z domyślnej."""
     sb = _sb_client()
     if not sb:
         return None
     try:
-        resp = sb.table(TABLE_NAME).select("data").eq("id", _board_id()).limit(1).execute()
+        resp = sb.table(_sb_table_name()).select("data").eq("id", _board_id()).limit(1).execute()
         rows = resp.data or []
         if not rows:
-            # pierwszy raz – utwórz domyślną tablicę
-            payload = {"id": _board_id(), "data": DEFAULT_BOARD.model_dump(mode="json")}
-            sb.table(TABLE_NAME).upsert(payload).execute()
-            return payload["data"]
+            sb.table(_sb_table_name()).upsert(
+                {"id": _board_id(), "data": default_payload, "updated_at": datetime.utcnow().isoformat()}
+            ).execute()
+            return default_payload
         return rows[0]["data"]
     except Exception as e:
         st.error(f"DB load error: {e}")
         return None
+
+
+def db_load_board_raw():
+    """Zwraca (row, status) do debugowania w sidebarze."""
+    sb = _sb_client()
+    if not sb:
+        return None, "no_client"
+    try:
+        resp = sb.table(_sb_table_name()).select("*").eq("id", _board_id()).limit(1).execute()
+        rows = resp.data or []
+        if not rows:
+            return None, "not_found"
+        return rows[0], "ok"
+    except Exception as e:
+        return {"error": str(e)}, "error"
 
 
 def db_save_board(board_dict: dict) -> None:
@@ -73,17 +102,16 @@ def db_save_board(board_dict: dict) -> None:
     if not sb:
         return
     try:
-        payload = {
-            "id": _board_id(),
-            "data": board_dict,
-            "updated_at": datetime.utcnow().isoformat(),
-        }
-        sb.table(TABLE_NAME).upsert(payload).execute()
+        payload = {"id": _board_id(), "data": board_dict, "updated_at": datetime.utcnow().isoformat()}
+        sb.table(_sb_table_name()).upsert(payload).execute()
+        st.session_state["_last_db_save"] = datetime.utcnow().strftime("%H:%M:%S")
     except Exception as e:
         st.error(f"DB save error: {e}")
 
 
-# ===== MODELE DANYCH =====
+# ╔════════════════════════════════════════════════════════════════╗
+# ║                         MODELE DANYCH                          ║
+# ╚════════════════════════════════════════════════════════════════╝
 Priority = Literal["Low", "Med", "High"]
 
 
@@ -126,8 +154,6 @@ class Board(BaseModel):
             for tid in col.task_ids:
                 if tid not in task_keys:
                     raise ValueError(f"Task id '{tid}' in column '{col.name}' not found.")
-
-        # Podczep osierocone zadania do pierwszej kolumny (jeśli są)
         assigned = {tid for c in self.columns for tid in c.task_ids}
         orphans = set(self.tasks.keys()) - assigned
         if orphans and self.columns:
@@ -144,24 +170,26 @@ DEFAULT_BOARD = Board(
     tasks={},
 )
 
-# ===== STAN (z DB fallbackiem) =====
+# ╔════════════════════════════════════════════════════════════════╗
+# ║                        STAN / OPERACJE                         ║
+# ╚════════════════════════════════════════════════════════════════╝
 def get_board() -> Board:
     # Pierwsze wczytanie: spróbuj DB, inaczej domyślny board
     if "board" not in st.session_state:
-        db_data = db_load_board()
+        db_data = db_load_board_default_insert(DEFAULT_BOARD.model_dump(mode="json"))
         st.session_state.board = db_data if db_data else DEFAULT_BOARD.model_dump(mode="json")
     return Board(**st.session_state.board)
 
 
 def save_board(board: Board):
-    # Zapisuj zarówno do session_state jak i do DB (jeśli skonfigurowana)
+    # Zapis do sesji i do DB (jeśli skonfigurowana)
     as_dict = board.model_dump(mode="json")
     st.session_state.board = as_dict
     db_save_board(as_dict)
 
 
 def bump_rev():
-    # Zmieniamy tylko przy operacjach "strukturalnych" (dodanie, import, kolumny)
+    # Zmieniamy przy operacjach strukturalnych (dodanie/import/kolumny)
     st.session_state[REV_KEY] = st.session_state.get(REV_KEY, 0) + 1
 
 
@@ -171,7 +199,6 @@ def next_id(prefix: str) -> str:
     return f"{prefix}-{_uuid.uuid4().hex[:8]}"
 
 
-# ===== OPERACJE NA STANIE =====
 def add_task(column_id: str, t: Task) -> str:
     b = get_board()
     tid = next_id("t")
@@ -181,7 +208,7 @@ def add_task(column_id: str, t: Task) -> str:
             c.task_ids.append(tid)
             break
     save_board(b)
-    bump_rev()  # nowa karta -> nowy rev (stabilny key DnD nie miga)
+    bump_rev()
     return tid
 
 
@@ -243,26 +270,45 @@ def delete_column(column_id: str, move_tasks_to: Optional[str] = None):
     bump_rev()
 
 
-# ===== FORMAT ETYKIETY (WIELOLINIA) =====
+# ╔════════════════════════════════════════════════════════════════╗
+# ║                  FORMAT ETYKIETY + UKRYTE ID                   ║
+# ╚════════════════════════════════════════════════════════════════╝
 def item_label_multiline(t: Task) -> str:
     """
-    Tytuł
-    Opis
-    YYYY-MM-DD (albo pusty wiersz, jeśli brak terminu)
-    Priorytet: X
+    <nazwa zadania>
+    <opis zadania>
+    <data zadania>
+    <priorytet>
     """
-    title = t.title.strip()
+    title = (t.title or "").strip()
     desc = (t.desc or "").strip()
-    due = t.due.isoformat() if t.due else ""
+    due = t.due.isoformat() if t.due else ""  # pusty wiersz, gdy brak daty
     prio = f"Priorytet: {t.priority}"
-    lines = [title]
-    if desc:
-        lines.append(desc)
-    lines.append(due)
-    lines.append(prio)
-    return "\n".join(lines)
+    # ZAWSZE 4 linie (jeśli opis/brak daty – to puste linie)
+    return "\n".join([title, desc, due, prio])
 
 
+# Niewidoczny znak separatora – schowamy za nim ID w tekście karty
+_HIDDEN = "\u2063"  # INVISIBLE SEPARATOR
+
+
+def encode_item(label: str, tid: str) -> str:
+    """To, co widzi użytkownik: label (4 linie); za niewidocznym separatorem zapisujemy ID."""
+    return f"{label}{_HIDDEN}{tid}"
+
+
+def decode_item_id(s: str) -> str:
+    """Parsuje ID z itemu (obsługuje nowy format i stary '::')."""
+    if _HIDDEN in s:
+        return s.rsplit(_HIDDEN, 1)[-1]
+    if "::" in s:  # zgodność ze starymi buildami
+        return s.split("::", 1)[0]
+    return s
+
+
+# ╔════════════════════════════════════════════════════════════════╗
+# ║                    IMPORT / EXPORT (JSON)                      ║
+# ╚════════════════════════════════════════════════════════════════╝
 def export_json_button(board: Board):
     data = board.model_dump(mode="json")
     for _, t in data["tasks"].items():
@@ -284,7 +330,7 @@ def import_json_uploader():
         try:
             raw = json.loads(up.read().decode("utf-8"))
             board = Board(**raw)
-            save_board(board)  # zapisze też do DB, jeśli skonfigurowana
+            save_board(board)  # zapis także do DB
             bump_rev()
             st.success("Zaimportowano tablicę.")
             st.rerun()
@@ -292,48 +338,62 @@ def import_json_uploader():
             st.error(f"Błąd walidacji importu: {e}")
 
 
-# ===== UI / LAYOUT =====
+# ╔════════════════════════════════════════════════════════════════╗
+# ║                          UI / LAYOUT                           ║
+# ╚════════════════════════════════════════════════════════════════╝
 st.set_page_config(page_title="Kanban – React UI", page_icon="🗂️", layout="wide")
 st.markdown(
     """
     <style>
       .sortable-container { background: rgba(127,127,127,.08); border-radius: 10px; padding: 10px; min-height: 64px; }
       .sortable-item { background: var(--background-color); border: 1px solid rgba(127,127,127,.35);
-                       border-radius: 8px; padding: 6px 10px; margin: 6px 0; font-size: .95rem;
+                       border-radius: 8px; padding: 8px 10px; margin: 6px 0; font-size: .95rem;
                        color: var(--text-color, #fff);
                        white-space: pre-line; line-height: 1.25;
                        transition: transform .08s ease, background-color .08s ease, box-shadow .08s ease; }
-      /* lżejsze marginesy strony */
+      .sortable-item::first-line { font-weight: 700; } /* pogrub tytuł (1. linia) */
       .block-container { padding-top: .6rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-b = get_board()
-
-# Pasek wersji / info o DB
+# Sidebar – status
 with st.sidebar:
     st.info(f"Build: {BUILD_TAG}")
-    if _sb_client():
-        st.success("Persistencja: Supabase (ON)")
+    sb = _sb_client()
+    if sb:
+        row, status = db_load_board_raw()
+        table = _sb_table_name()
+        if status == "ok":
+            last = row.get("updated_at", "—")
+            st.success("Persistencja: Supabase (ON)")
+            st.caption(f"Tabela: {table} | Row id: {_board_id()} | Updated: {last}")
+            if st.button("🔁 Force DB reload", use_container_width=True):
+                st.session_state.pop("board", None)
+                st.rerun()
+            with st.expander("🧪 Debug: Raw DB row"):
+                st.code(json.dumps(row, ensure_ascii=False, indent=2), language="json")
+        elif status == "not_found":
+            st.warning(f"Persistencja: ON, ale brak rekordu w tabeli '{table}'. Zapis pojawi się po pierwszej zmianie.")
     else:
-        st.warning("Persistencja: tylko sesja (OFF) — dodaj SUPABASE_URL/KEY w Secrets.")
+        st.warning("Persistencja: tylko sesja (OFF) – dodaj SUPABASE_URL/KEY w Secrets.")
 
-# Sidebar: Filtry
+# Sidebar – Filtry
+b = get_board()
 st.sidebar.header("🔎 Filtry")
 title_filter = st.sidebar.text_input("Tytuł zawiera…")
 prio_filter = st.sidebar.multiselect("Priorytet", options=["Low", "Med", "High"])
 all_tags = sorted({tag for task in b.tasks.values() for tag in task.tags})
 tags_filter = st.sidebar.multiselect("Tagi", options=all_tags)
 
-# Sidebar: Import/Export
+# Sidebar – Import/Export
 st.sidebar.divider()
 st.sidebar.header("💾 Import / Export")
 export_json_button(b)
 import_json_uploader()
 
-# Sidebar: Kolumny
+# Sidebar – Kolumny
 st.sidebar.divider()
 st.sidebar.header("🧱 Kolumny")
 with st.sidebar.expander("Dodaj kolumnę"):
@@ -373,7 +433,7 @@ with st.sidebar.expander("Usuń kolumnę"):
             delete_column(col_opts2[del_name], move_to)
             st.rerun()
 
-# Dodawanie zadań
+# Sidebar – Dodawanie zadań
 st.sidebar.divider()
 with elements("add_task_header"):
     mui.Typography("➕ Dodaj zadanie", variant="h6")
@@ -402,7 +462,7 @@ with st.sidebar.form("add_task_form_sidebar", clear_on_submit=True):
             st.success("Dodano zadanie.")
             st.rerun()
 
-# Edycja/Usuwanie/Done
+# Sidebar – Edycja/Usuwanie/Done
 with st.sidebar.expander("🛠️ Edycja/Usuwanie zadania"):
     task_choices = []
     for c in b.columns:
@@ -471,11 +531,11 @@ if st.session_state.get("edit_task_id"):
                     st.session_state.pop("edit_task_id", None)
                     st.rerun()
 
-# ===== NAGŁÓWEK (React/MUI) =====
+# Nagłówek (React/MUI)
 with elements("title"):
     mui.Typography(f"📋 Tablica Kanban — {BUILD_TAG}", variant="h4", gutterBottom=True)
 
-# ===== GŁÓWNA TABLICA: DnD =====
+# Główna tablica (DnD)
 def pass_filter(t: Task) -> bool:
     ok_title = title_filter.lower() in t.title.lower() if title_filter else True
     ok_prio = (t.priority in prio_filter) if prio_filter else True
@@ -491,11 +551,14 @@ for col in b.columns:
         t = b.tasks.get(tid)
         if not t:
             continue
-        label = item_label_multiline(t) if pass_filter(t) else f"(ukryte filtrem) {t.title}"
-        items.append(f"{tid}::{label}")
+        if pass_filter(t):
+            label = item_label_multiline(t)
+        else:
+            label = f"(ukryte filtrem)\n\n\nPriorytet: {t.priority}"
+        items.append(encode_item(label, tid))  # widoczny label, ID ukryte
     containers.append({"header": f"{col.name}", "items": items})
 
-# Stabilny klucz oparty o licznik REV — mniej remountów, brak „migania”
+# Stabilny klucz oparty o licznik REV – mniej remountów, brak „migania”
 rev = st.session_state.get(REV_KEY, 0)
 result = sort_items(containers, multi_containers=True, direction="vertical", key=f"react-kanban-{rev}")
 
@@ -517,11 +580,11 @@ if result is not None:
     changed = False
     b2 = get_board()
     for i, col in enumerate(b2.columns):
-        new_ids = [s.split("::", 1)[0] for s in (normalized[i] if i < len(normalized) else [])]
+        new_ids = [decode_item_id(s) for s in (normalized[i] if i < len(normalized) else [])]
         if new_ids != col.task_ids:
             col.task_ids = new_ids
             changed = True
     if changed:
         save_board(b2)  # bez st.rerun(); komponent sam odświeży UI
 
-st.caption("Import zastępuje stan, Export pobiera snapshot. Persistencja włączona przez Supabase (jeśli skonfigurowana).")
+st.caption("Import zastępuje stan, Export pobiera snapshot. Supabase włączona jeśli podałeś sekrety.")
