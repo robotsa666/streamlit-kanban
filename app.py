@@ -1,10 +1,9 @@
 # app.py — Kanban (React UI + smooth DnD + Supabase + MODALE Add/Edit)
-# Wersja: v5.3-supabase-modals
-# - DnD: streamlit-sortables (stabilny klucz, brak zbędnych rerunów)
-# - Karty: 4 linie: <tytuł>\n<opis>\n<data>\n<Priorytet: X>
-# - ID ukryte (niewidoczny separator) — DnD działa, ale kafelek nie pokazuje t-...
-# - Persistencja: Supabase (JSONB) + fallback do session_state
-# - NOWOŚĆ: przyciski ➕/✏️ nad tablicą otwierają modale z formularzami
+# Wersja: v5.3.2-supabase-modals-compat
+# - Modale kompatybilne: _modal() używa st.modal -> st.dialog -> st.experimental_dialog -> fallback container
+# - DnD: streamlit-sortables z kluczem REV (bez migania)
+# - Karty: 4 linie (tytuł, opis, data, Priorytet: X)
+# - Supabase persist + debug w sidebarze
 
 from __future__ import annotations
 
@@ -17,10 +16,36 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from streamlit_sortables import sort_items
 from streamlit_elements import elements, mui
 
-BUILD_TAG = "v5.3-supabase-modals"
-REV_KEY = "_view_rev"  # zwiększamy PRZY dodawaniu/import/zmianie kolumn; NIE przy DnD
+BUILD_TAG = "v5.3.2-supabase-modals-compat"
+REV_KEY = "_view_rev"
 
-# ───────────────────── Supabase helpers ───────────────────── #
+# ───────────── Polyfill modala ───────────── #
+def _modal(title: str, key: str | None = None):
+    """Zwraca context manager na modal w zależności od wersji Streamlit."""
+    if getattr(st, "modal", None):
+        try:
+            return st.modal(title, key=key)
+        except TypeError:
+            return st.modal(title)
+    if getattr(st, "dialog", None):
+        try:
+            return st.dialog(title, key=key)
+        except TypeError:
+            return st.dialog(title)
+    if getattr(st, "experimental_dialog", None):
+        try:
+            return st.experimental_dialog(title, key=key)
+        except TypeError:
+            return st.experimental_dialog(title)
+    class _Dummy:
+        def __enter__(self):
+            st.markdown(f"### {title}")
+            return st.container()
+        def __exit__(self, exc_type, exc, tb):
+            return False
+    return _Dummy()
+
+# ───────────── Supabase helpers ───────────── #
 def _sb_table_name() -> str:
     return st.secrets.get("SUPABASE_TABLE", "boards")
 
@@ -83,7 +108,7 @@ def db_save_board(board_dict: dict) -> None:
     except Exception as e:
         st.error(f"DB save error: {e}")
 
-# ───────────────────── Modele danych ───────────────────── #
+# ───────────── Modele ───────────── #
 Priority = Literal["Low", "Med", "High"]
 
 class Task(BaseModel):
@@ -93,14 +118,11 @@ class Task(BaseModel):
     due: Optional[date] = None
     tags: list[str] = Field(default_factory=list)
     done: bool = False
-
     @field_validator("due", mode="before")
     @classmethod
     def parse_due(cls, v):
-        if v in ("", None):
-            return None
-        if isinstance(v, str):
-            return date.fromisoformat(v)
+        if v in ("", None): return None
+        if isinstance(v, str): return date.fromisoformat(v)
         return v
 
 class ColumnModel(BaseModel):
@@ -111,18 +133,15 @@ class ColumnModel(BaseModel):
 class Board(BaseModel):
     columns: list[ColumnModel]
     tasks: dict[str, Task]
-
     @model_validator(mode="after")
     def check_references(self):
         task_keys = set(self.tasks.keys())
         seen = set()
         for col in self.columns:
-            if col.id in seen:
-                raise ValueError(f"Duplicate column id '{col.id}'.")
+            if col.id in seen: raise ValueError(f"Duplicate column id '{col.id}'.")
             seen.add(col.id)
             for tid in col.task_ids:
-                if tid not in task_keys:
-                    raise ValueError(f"Task id '{tid}' in column '{col.name}' not found.")
+                if tid not in task_keys: raise ValueError(f"Task id '{tid}' w kolumnie '{col.name}' nie istnieje.")
         assigned = {tid for c in self.columns for tid in c.task_ids}
         orphans = set(self.tasks.keys()) - assigned
         if orphans and self.columns:
@@ -131,14 +150,14 @@ class Board(BaseModel):
 
 DEFAULT_BOARD = Board(
     columns=[
-        ColumnModel(id="todo", name="Do zrobienia", task_ids=[]),
-        ColumnModel(id="inprog", name="W trakcie", task_ids=[]),
-        ColumnModel(id="done", name="Zrobione", task_ids=[]),
+        ColumnModel(id="todo",   name="Do zrobienia", task_ids=[]),
+        ColumnModel(id="inprog", name="W trakcie",   task_ids=[]),
+        ColumnModel(id="done",   name="Zrobione",    task_ids=[]),
     ],
     tasks={},
 )
 
-# ───────────────────── Stan / operacje ───────────────────── #
+# ───────────── Stan / operacje ───────────── #
 def get_board() -> Board:
     if "board" not in st.session_state:
         db_data = db_load_board_default_insert(DEFAULT_BOARD.model_dump(mode="json"))
@@ -158,81 +177,61 @@ def next_id(prefix: str) -> str:
     return f"{prefix}-{_uuid.uuid4().hex[:8]}"
 
 def add_task(column_id: str, t: Task) -> str:
-    b = get_board()
-    tid = next_id("t")
+    b = get_board(); tid = next_id("t")
     b.tasks[tid] = t
     for c in b.columns:
-        if c.id == column_id:
-            c.task_ids.append(tid)
-            break
+        if c.id == column_id: c.task_ids.append(tid); break
     save_board(b); bump_rev(); return tid
 
 def edit_task(task_id: str, updates: dict):
     b = get_board()
-    if task_id not in b.tasks:
-        st.error("Nie znaleziono zadania.")
-        return
+    if task_id not in b.tasks: st.error("Nie znaleziono zadania."); return
     new = b.tasks[task_id].model_copy(update=updates)
-    b.tasks[task_id] = Task(**new.model_dump())
-    save_board(b)
+    b.tasks[task_id] = Task(**new.model_dump()); save_board(b)
 
 def delete_task(task_id: str):
-    b = get_board()
-    b.tasks.pop(task_id, None)
+    b = get_board(); b.tasks.pop(task_id, None)
     for c in b.columns:
-        if task_id in c.task_ids:
-            c.task_ids.remove(task_id)
+        if task_id in c.task_ids: c.task_ids.remove(task_id)
     save_board(b)
 
 def add_column(name: str) -> str:
-    b = get_board()
-    cid = next_id("c")
-    b.columns.append(ColumnModel(id=cid, name=name))
-    save_board(b); bump_rev(); return cid
+    b = get_board(); cid = next_id("c")
+    b.columns.append(ColumnModel(id=cid, name=name)); save_board(b); bump_rev(); return cid
 
 def rename_column(column_id: str, new_name: str):
     b = get_board()
     for c in b.columns:
-        if c.id == column_id:
-            c.name = new_name
-            break
+        if c.id == column_id: c.name = new_name; break
     save_board(b); bump_rev()
 
 def delete_column(column_id: str, move_tasks_to: Optional[str] = None):
     b = get_board()
     idx = next((i for i, c in enumerate(b.columns) if c.id == column_id), None)
-    if idx is None:
-        st.error("Kolumna nie istnieje.")
-        return
+    if idx is None: st.error("Kolumna nie istnieje."); return
     col = b.columns[idx]
-    if col.task_ids and not move_tasks_to:
-        st.error("Kolumna nie jest pusta. Wybierz kolumnę docelową.")
-        return
+    if col.task_ids and not move_tasks_to: st.error("Kolumna nie jest pusta. Wybierz kolumnę docelową."); return
     if move_tasks_to:
         for c in b.columns:
-            if c.id == move_tasks_to:
-                c.task_ids.extend(col.task_ids); break
+            if c.id == move_tasks_to: c.task_ids.extend(col.task_ids); break
     del b.columns[idx]; save_board(b); bump_rev()
 
-# ────────────────── Etykieta 4-linie + ukryte ID ────────────────── #
+# ───────────── Etykieta + ukryte ID ───────────── #
 def item_label_multiline(t: Task) -> str:
     title = (t.title or "").strip()
     desc  = (t.desc  or "").strip()
-    due   = t.due.isoformat() if t.due else ""  # pusty wiersz, gdy brak daty
+    due   = t.due.isoformat() if t.due else ""
     prio  = f"Priorytet: {t.priority}"
     return "\n".join([title, desc, due, prio])
 
-_HIDDEN = "\u2063"  # invisible separator
-
-def encode_item(label: str, tid: str) -> str:
-    return f"{label}{_HIDDEN}{tid}"
-
+_HIDDEN = "\u2063"
+def encode_item(label: str, tid: str) -> str: return f"{label}{_HIDDEN}{tid}"
 def decode_item_id(s: str) -> str:
     if _HIDDEN in s: return s.rsplit(_HIDDEN, 1)[-1]
-    if "::" in s:     return s.split("::", 1)[0]
+    if "::" in s:    return s.split("::", 1)[0]
     return s
 
-# ───────────────────── Import / Export ───────────────────── #
+# ───────────── Import / Export ───────────── #
 def export_json_button(board: Board):
     data = board.model_dump(mode="json")
     for _, t in data["tasks"].items():
@@ -250,7 +249,7 @@ def import_json_uploader():
         except Exception as e:
             st.error(f"Błąd walidacji importu: {e}")
 
-# ───────────────────── UI / Layout ───────────────────── #
+# ───────────── UI / Styl ───────────── #
 st.set_page_config(page_title="Kanban – React UI", page_icon="🗂️", layout="wide")
 st.markdown("""
 <style>
@@ -265,7 +264,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Sidebar – status / db
+# ───────────── Sidebar: status/db ───────────── #
 with st.sidebar:
     st.info(f"Build: {BUILD_TAG}")
     sb = _sb_client()
@@ -283,7 +282,7 @@ with st.sidebar:
     else:
         st.warning("Persistencja: tylko sesja (OFF) – dodaj SUPABASE_URL/KEY w Secrets.")
 
-# Sidebar – Filtry + Import/Export + Kolumny
+# ───────────── Sidebar: filtry i narzędzia ───────────── #
 b = get_board()
 st.sidebar.header("🔎 Filtry")
 title_filter = st.sidebar.text_input("Tytuł zawiera…")
@@ -323,20 +322,19 @@ with st.sidebar.expander("Usuń kolumnę"):
             move_to = dict(others).get(tgt_name) if tgt_name != "—" else None
             delete_column(col_opts2[del_name], move_to); st.rerun()
 
-# ───────────────────── Toolbar nad tablicą ───────────────────── #
+# ───────────── Toolbar + przyciski ───────────── #
 with elements("title"):
     mui.Typography(f"📋 Tablica Kanban — {BUILD_TAG}", variant="h4", gutterBottom=True)
 
-tb1, tb2 = st.columns([0.2, 0.2])
+tb1, tb2 = st.columns([0.22, 0.22])
 open_add  = tb1.button("➕ Dodaj zadanie", use_container_width=True, key="open_add_btn")
 open_edit = tb2.button("✏️ Edytuj zadanie", use_container_width=True, key="open_edit_btn")
-
 if open_add:  st.session_state["show_add_modal"]  = True
 if open_edit: st.session_state["show_edit_modal"] = True
 
-# ─────────────── Modal: Dodaj zadanie ─────────────── #
+# ───────────── Modal: Dodaj zadanie ───────────── #
 if st.session_state.get("show_add_modal"):
-    with st.modal("➕ Dodaj zadanie", key="add_modal"):
+    with _modal("➕ Dodaj zadanie", key="add_modal"):
         b = get_board()
         col_map = {c.name: c.id for c in b.columns}
         with st.form("add_task_form_modal", clear_on_submit=True):
@@ -350,7 +348,6 @@ if st.session_state.get("show_add_modal"):
             add_tags_txt    = c2[1].text_input("Tagi (rozdziel przecinkami)", placeholder="ops, ui, backend")
             add_colname     = st.selectbox("Kolumna docelowa", options=list(col_map.keys()) if col_map else [])
             submitted       = st.form_submit_button("Dodaj")
-        # obsługa submit
         if submitted:
             if not add_title or not add_title.strip():
                 st.error("Tytuł jest wymagany.")
@@ -366,20 +363,17 @@ if st.session_state.get("show_add_modal"):
                 st.success("Dodano zadanie.")
                 st.rerun()
         if st.button("Anuluj", type="secondary"):
-            st.session_state["show_add_modal"] = False
-            st.rerun()
+            st.session_state["show_add_modal"] = False; st.rerun()
 
-# ─────────────── Modal: Edytuj zadanie ─────────────── #
+# ───────────── Modal: Edytuj zadanie ───────────── #
 if st.session_state.get("show_edit_modal"):
-    with st.modal("✏️ Edytuj zadanie", key="edit_modal"):
+    with _modal("✏️ Edytuj zadanie", key="edit_modal"):
         b = get_board()
-        # lista "Kolumna: Tytuł" -> id
         task_choices = []
         for c in b.columns:
             for tid in c.task_ids:
                 t = b.tasks.get(tid)
-                if t:
-                    task_choices.append((f"{c.name}: {t.title}", tid))
+                if t: task_choices.append((f"{c.name}: {t.title}", tid))
         if not task_choices:
             st.info("Brak zadań do edycji.")
             if st.button("Zamknij"):
@@ -389,7 +383,6 @@ if st.session_state.get("show_edit_modal"):
             selected_label = st.selectbox("Wybierz zadanie", options=labels, key="edit_modal_select")
             selected_tid   = dict(task_choices)[selected_label]
             t = b.tasks[selected_tid]
-            # kolumna aktualna
             current_col_id = next((c.id for c in b.columns if selected_tid in c.task_ids), b.columns[0].id)
             col_map2  = {c.name: c.id for c in b.columns}
             col_names = list(col_map2.keys())
@@ -406,7 +399,6 @@ if st.session_state.get("show_edit_modal"):
                 etags    = c2[1].text_input("Tagi (rozdziel przecinkami)", value=", ".join(t.tags))
                 ecolname = st.selectbox("Kolumna", options=col_names, index=col_names.index(current_col_name))
                 save_btn = st.form_submit_button("Zapisz")
-            # akcje
             cA, cB, cC = st.columns(3)
             del_click  = cA.button("🗑️ Usuń", use_container_width=True)
             done_click = cB.button("✅ Done/Undone", use_container_width=True)
@@ -424,34 +416,25 @@ if st.session_state.get("show_edit_modal"):
                         "tags": [x.strip() for x in etags.split(",") if x.strip()],
                     }
                     edit_task(selected_tid, updates)
-                    # zmiana kolumny?
                     new_col_id = col_map2[ecolname]
                     if new_col_id != current_col_id:
                         b2 = get_board()
                         for c in b2.columns:
-                            if selected_tid in c.task_ids:
-                                c.task_ids.remove(selected_tid)
+                            if selected_tid in c.task_ids: c.task_ids.remove(selected_tid)
                         for c in b2.columns:
-                            if c.id == new_col_id:
-                                c.task_ids.append(selected_tid)
+                            if c.id == new_col_id: c.task_ids.append(selected_tid)
                         save_board(b2)
                     st.session_state["show_edit_modal"] = False
-                    st.success("Zapisano zadanie.")
-                    st.rerun()
+                    st.success("Zapisano zadanie."); st.rerun()
             if del_click:
-                delete_task(selected_tid)
-                st.session_state["show_edit_modal"] = False
-                st.success("Usunięto zadanie.")
-                st.rerun()
+                delete_task(selected_tid); st.session_state["show_edit_modal"] = False
+                st.success("Usunięto zadanie."); st.rerun()
             if done_click:
-                edit_task(selected_tid, {"done": not t.done})
-                st.session_state["show_edit_modal"] = False
-                st.rerun()
+                edit_task(selected_tid, {"done": not t.done}); st.session_state["show_edit_modal"] = False; st.rerun()
             if cancel_btn:
-                st.session_state["show_edit_modal"] = False
-                st.rerun()
+                st.session_state["show_edit_modal"] = False; st.rerun()
 
-# ───────────────────── Tablica (DnD) ───────────────────── #
+# ───────────── Tablica (DnD) ───────────── #
 def pass_filter(t: Task) -> bool:
     ok_title = title_filter.lower() in t.title.lower() if title_filter else True
     ok_prio  = (t.priority in prio_filter) if prio_filter else True
@@ -465,10 +448,7 @@ for col in b.columns:
     for tid in col.task_ids:
         t = b.tasks.get(tid)
         if not t: continue
-        if pass_filter(t):
-            label = item_label_multiline(t)
-        else:
-            label = f"(ukryte filtrem)\n\n\nPriorytet: {t.priority}"
+        label = item_label_multiline(t) if pass_filter(t) else f"(ukryte filtrem)\n\n\nPriorytet: {t.priority}"
         items.append(encode_item(label, tid))
     containers.append({"header": f"{col.name}", "items": items})
 
@@ -489,6 +469,6 @@ if result is not None:
     for i, col in enumerate(b2.columns):
         new_ids = [decode_item_id(s) for s in (normalized[i] if i < len(normalized) else [])]
         if new_ids != col.task_ids: col.task_ids = new_ids; changed = True
-    if changed: save_board(b2)  # bez st.rerun()
+    if changed: save_board(b2)
 
-st.caption("Modale: Dodaj/Edycja nad tablicą. Import zastępuje stan, Export pobiera snapshot. Supabase – jeśli skonfigurowana.")
+st.caption("Modale kompatybilne. Import zastępuje stan, Export pobiera snapshot. Supabase włączony, jeśli skonfigurowano.")
