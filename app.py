@@ -1,10 +1,11 @@
 # app.py — Kanban (React UI + smooth DnD + Supabase + MODALE Add/Edit)
-# Wersja: v5.3.3-supabase-modals-fallback
+# Wersja: v5.3.4-supabase-modals-fallback (one-modal-at-a-time)
 # - Modale: _modal() używa natywnego st.modal jeśli jest; w starszych wersjach Streamlit
-#   wyświetla „panel–modal” jako fallback (bez st.dialog).
+#   pokazuje „panel–modal” (fallback) — bez st.dialog.
 # - DnD: streamlit-sortables z kluczem REV (bez migania)
 # - Karty: 4 linie (tytuł, opis, data, Priorytet: X)
 # - Supabase persist + podstawowy debug w sidebarze
+# - NOWE: zawsze tylko jeden modal na raz (kliknięcie jednego zamyka drugi)
 
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from streamlit_sortables import sort_items
 from streamlit_elements import elements, mui
 
-BUILD_TAG = "v5.3.3-supabase-modals-fallback"
+BUILD_TAG = "v5.3.4-supabase-modals-fallback"
 REV_KEY = "_view_rev"
 
 # ───────────── Polyfill modala ───────────── #
@@ -334,15 +335,23 @@ with st.sidebar.expander("Usuń kolumnę"):
             move_to = dict(others).get(tgt_name) if tgt_name != "—" else None
             delete_column(col_opts2[del_name], move_to); st.rerun()
 
-# ───────────── Toolbar + przyciski ───────────── #
+# ───────────── Toolbar + przyciski (jeden modal na raz) ───────────── #
 with elements("title"):
     mui.Typography(f"📋 Tablica Kanban — {BUILD_TAG}", variant="h4", gutterBottom=True)
 
 tb1, tb2 = st.columns([0.22, 0.22])
 open_add  = tb1.button("➕ Dodaj zadanie", use_container_width=True, key="open_add_btn")
 open_edit = tb2.button("✏️ Edytuj zadanie", use_container_width=True, key="open_edit_btn")
-if open_add:  st.session_state["show_add_modal"]  = True
-if open_edit: st.session_state["show_edit_modal"] = True
+
+# Upewnij się: tylko jeden modal jednocześnie
+if open_add:
+    st.session_state["show_add_modal"] = True
+    st.session_state["show_edit_modal"] = False
+if open_edit:
+    st.session_state["show_edit_modal"] = True
+    st.session_state["show_add_modal"] = False
+if st.session_state.get("show_add_modal") and st.session_state.get("show_edit_modal"):
+    st.session_state["show_add_modal"] = False  # preferuj „Edytuj”, jeśli oba True
 
 # ───────────── Modal: Dodaj zadanie ───────────── #
 if st.session_state.get("show_add_modal"):
@@ -482,4 +491,4 @@ if result is not None:
         if new_ids != col.task_ids: col.task_ids = new_ids; changed = True
     if changed: save_board(b2)
 
-st.caption("Modale kompatybilne. Import zastępuje stan, Export pobiera snapshot. Supabase włączony, jeśli skonfigurowano.")
+st.caption("Modale kompatybilne (jeden naraz). Import zastępuje stan, Export pobiera snapshot. Supabase włączony, jeśli skonfigurowano.")
