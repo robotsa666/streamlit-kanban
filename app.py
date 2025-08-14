@@ -1,14 +1,11 @@
 # app.py — Kanban (Projekty + React UI + smooth DnD + Supabase + Modale Add/Edit)
-# Wersja: v5.4.0-projects-overlay
-# - Projekty: wiele tablic (projektów) w jednej aplikacji; wybór w lewym sidebarze
-#   z wyszukiwarką, dodawaniem, zmianą nazwy i usuwaniem projektu.
-# - Persistencja: Supabase (każdy projekt = osobny wiersz w tabeli) + fallback w session_state.
-# - Modale: _modal() używa natywnego st.modal (jeśli jest); inaczej overlay fallback (bez st.dialog).
-# - DnD: streamlit-sortables z kluczem REV (bez migania).
-# - Karty: 4 linie (tytuł, opis, data, Priorytet: X).
-# - Ustaw w Secrets (Streamlit Cloud → Settings → Secrets):
-#     SUPABASE_URL, SUPABASE_KEY, (opcjonalnie) SUPABASE_TABLE="boards"
-#     (BOARD_ID nie jest już potrzebne — projekty wybierasz z UI)
+# Wersja: v5.4.1-projects-overlay-keys
+# - Projekty w sidebarze (lista + wyszukiwarka, dodaj/zmień nazwę/usuń)
+# - Unikalne key= dla WSZYSTKICH przycisków (fix StreamlitDuplicateElementId)
+# - Modale: natywny st.modal lub fallback overlay
+# - DnD: streamlit-sortables
+# - Karty: 4 linie (tytuł, opis, data, Priorytet: X)
+# - Persistencja: Supabase (1 wiersz = 1 projekt); fallback w session_state
 
 from __future__ import annotations
 
@@ -21,16 +18,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from streamlit_sortables import sort_items
 from streamlit_elements import elements, mui
 
-BUILD_TAG = "v5.4.0-projects-overlay"
+BUILD_TAG = "v5.4.1-projects-overlay-keys"
 REV_KEY = "_view_rev"
 
 # ───────────────────────── Polyfill modala (z overlayem) ───────────────────────── #
 def _modal(title: str, key: str | None = None):
-    """
-    Zwraca context manager na modal:
-      • jeśli jest st.modal → używamy natywnego modala,
-      • w przeciwnym razie – pełnoekranowy overlay + panel jako fallback (działa w każdej wersji).
-    """
+    """Natywny st.modal jeśli dostępny; inaczej pełnoekranowy overlay."""
     if getattr(st, "modal", None):
         try:
             return st.modal(title, key=key)
@@ -146,14 +139,12 @@ DEFAULT_BOARD = Board(
 
 # ───────────────────────── Projekty: stan + DB ───────────────────────── #
 def _default_project_id() -> str:
-    # Startowo: 'main' (możesz zmienić później w UI)
     return st.session_state.get("project_id") or "main"
 
 def _set_project_id(pid: str):
     st.session_state["project_id"] = pid
 
 def _ss_projects_store() -> dict:
-    # Fallback bez Supabase: słownik {project_id: board_dict}
     if "projects_store" not in st.session_state:
         st.session_state["projects_store"] = {}
     return st.session_state["projects_store"]
@@ -178,7 +169,6 @@ def db_list_projects() -> list[str]:
     try:
         resp = sb.table(_sb_table_name()).select("id").order("id", desc=False).execute()
         ids = [r["id"] for r in (resp.data or [])]
-        # Jeśli pusto — utwórz 'main'
         if not ids:
             sb.table(_sb_table_name()).upsert(
                 {"id": "main", "data": DEFAULT_BOARD.model_dump(mode="json"), "updated_at": datetime.utcnow().isoformat()}
@@ -250,7 +240,6 @@ def db_delete_project(pid: str) -> None:
         st.error(f"DB delete project error: {e}")
 
 def db_clone_project(old_id: str, new_id: str) -> bool:
-    # Używane przy zmianie nazwy (tworzymy nowy wiersz i kasujemy stary)
     data = db_load_board_default_insert(old_id, DEFAULT_BOARD.model_dump(mode="json"))
     if data is None:
         return False
@@ -289,7 +278,6 @@ def bump_rev():
 
 def switch_project(pid: str):
     _set_project_id(pid)
-    # Wymuś ponowne wczytanie
     st.session_state.pop("board", None)
     st.session_state["_board_pid"] = pid
     bump_rev()
@@ -379,13 +367,18 @@ def export_json_button(board: Board, pid: str):
     data = board.model_dump(mode="json")
     for _, t in data["tasks"].items():
         if t.get("due") is None: t["due"] = ""
-    fname = f"{pid}_board.json"
-    st.download_button("⬇️ Export JSON", json.dumps(data, ensure_ascii=False, indent=2),
-                       file_name=fname, mime="application/json", use_container_width=True)
+    st.download_button("⬇️ Export JSON",
+                       json.dumps(data, ensure_ascii=False, indent=2),
+                       file_name=f"{pid}_board.json",
+                       mime="application/json",
+                       use_container_width=True,
+                       key="export_json_btn")
 
 def import_json_uploader(pid: str):
     token = st.session_state.get("_import_token", "0")
-    up = st.file_uploader(f"Import JSON do projektu “{pid}” (zastąpi bieżącą tablicę)", type=["json"], key=f"import_{token}")
+    up = st.file_uploader(f"Import JSON do projektu “{pid}” (zastąpi bieżącą tablicę)",
+                          type=["json"],
+                          key=f"import_{token}")
     if up is not None:
         try:
             raw = json.loads(up.read().decode("utf-8")); board = Board(**raw)
@@ -413,27 +406,27 @@ st.markdown("""
 with st.sidebar:
     st.info(f"Build: {BUILD_TAG}")
 
-# Listuj projekty z DB/fallback
 all_projects = db_list_projects()
 if "project_id" not in st.session_state:
     _set_project_id(all_projects[0] if all_projects else "main")
 
 with st.sidebar.expander("📁 Projekt – wybór", expanded=True):
-    q = st.text_input("Szukaj projektu…", placeholder="pisz, aby filtrować")
+    q = st.text_input("Szukaj projektu…", placeholder="pisz, aby filtrować", key="project_search")
     filtered = [p for p in all_projects if (q.lower() in p.lower())] if q else all_projects
-    # Zadbaj, by bieżący był na liście (np. po zmianie nazwy)
     cur_pid = current_project()
     if cur_pid not in filtered and cur_pid in all_projects:
         filtered = [cur_pid] + filtered
     if not filtered:
         filtered = all_projects or ["main"]
-    sel = st.selectbox("Wybierz projekt", options=filtered, index=filtered.index(cur_pid) if cur_pid in filtered else 0)
+    sel = st.selectbox("Wybierz projekt", options=filtered,
+                       index=filtered.index(cur_pid) if cur_pid in filtered else 0,
+                       key="project_select")
     if sel != cur_pid:
         switch_project(sel)
 
 with st.sidebar.expander("Nowy projekt"):
     np_name = st.text_input("Nazwa projektu", key="np_name")
-    if st.button("➕ Utwórz projekt", use_container_width=True):
+    if st.button("➕ Utwórz projekt", use_container_width=True, key="create_project_btn"):
         name = (np_name or "").strip()
         if not name:
             st.error("Podaj nazwę projektu.")
@@ -448,7 +441,7 @@ with st.sidebar.expander("Nowy projekt"):
 
 with st.sidebar.expander("Zmień nazwę projektu"):
     rn_new = st.text_input("Nowa nazwa", key="rn_new")
-    if st.button("✏️ Zmień nazwę", use_container_width=True, disabled=not rn_new.strip()):
+    if st.button("✏️ Zmień nazwę", use_container_width=True, key="rename_project_btn", disabled=not rn_new.strip()):
         new_name = rn_new.strip()
         old = current_project()
         if not new_name:
@@ -464,14 +457,13 @@ with st.sidebar.expander("Zmień nazwę projektu"):
                 st.rerun()
 
 with st.sidebar.expander("Usuń projekt"):
-    del_ok = st.checkbox("Tak, usuń ten projekt")
-    if st.button("🗑️ Usuń projekt", use_container_width=True, disabled=not del_ok):
+    del_ok = st.checkbox("Tak, usuń ten projekt", key="confirm_delete_project")
+    if st.button("🗑️ Usuń projekt", use_container_width=True, key="delete_project_btn", disabled=not del_ok):
         pid = current_project()
         projects_now = db_list_projects()
         if len(projects_now) <= 1:
             st.error("Nie można usunąć jedynego projektu.")
         else:
-            # wybierz inny projekt jako aktywny
             next_pid = next((p for p in projects_now if p != pid), "main")
             db_delete_project(pid)
             _set_project_id(next_pid)
@@ -488,9 +480,9 @@ with st.sidebar:
         table = _sb_table_name()
         if status == "ok":
             last = row.get("updated_at", "—")
-            st.success(f"Persistencja: Supabase (ON)")
+            st.success("Persistencja: Supabase (ON)")
             st.caption(f"Projekt: {pid} | Tabela: {table} | Updated: {last}")
-            if st.button("🔁 Force DB reload", use_container_width=True):
+            if st.button("🔁 Force DB reload", use_container_width=True, key="force_db_reload_btn"):
                 st.session_state.pop("board", None)
                 st.rerun()
         elif status == "not_found":
@@ -501,10 +493,10 @@ with st.sidebar:
 # ───────────────────────── SIDEBAR: Filtry + Import/Export + Kolumny ───────────────────────── #
 b = get_board()
 st.sidebar.header("🔎 Filtry")
-title_filter = st.sidebar.text_input("Tytuł zawiera…")
-prio_filter  = st.sidebar.multiselect("Priorytet", options=["Low", "Med", "High"])
+title_filter = st.sidebar.text_input("Tytuł zawiera…", key="filter_title")
+prio_filter  = st.sidebar.multiselect("Priorytet", options=["Low", "Med", "High"], key="filter_prio")
 all_tags     = sorted({tag for task in b.tasks.values() for tag in task.tags})
-tags_filter  = st.sidebar.multiselect("Tagi", options=all_tags)
+tags_filter  = st.sidebar.multiselect("Tagi", options=all_tags, key="filter_tags")
 
 st.sidebar.divider(); st.sidebar.header("💾 Import / Export")
 export_json_button(b, current_project())
@@ -513,7 +505,7 @@ import_json_uploader(current_project())
 st.sidebar.divider(); st.sidebar.header("🧱 Kolumny")
 with st.sidebar.expander("Dodaj kolumnę"):
     new_col_name = st.text_input("Nazwa nowej kolumny", key="new_col_name")
-    if st.button("➕ Dodaj kolumnę", use_container_width=True):
+    if st.button("➕ Dodaj kolumnę", use_container_width=True, key="add_column_btn"):
         if new_col_name and new_col_name.strip():
             add_column(new_col_name.strip()); st.success("Dodano kolumnę."); st.rerun()
         else:
@@ -521,9 +513,9 @@ with st.sidebar.expander("Dodaj kolumnę"):
 with st.sidebar.expander("Zmień nazwę kolumny"):
     col_opts = {c.name: c.id for c in b.columns}
     if col_opts:
-        sel_name = st.selectbox("Kolumna", options=list(col_opts.keys()), key="rename_sel")
-        new_name = st.text_input("Nowa nazwa", key="rename_val")
-        if st.button("✏️ Zmień nazwę", use_container_width=True):
+        sel_name = st.selectbox("Kolumna", options=list(col_opts.keys()), key="rename_col_sel")
+        new_name = st.text_input("Nowa nazwa", key="rename_col_val")
+        if st.button("✏️ Zmień nazwę", use_container_width=True, key="rename_column_btn"):
             if new_name and new_name.strip():
                 rename_column(col_opts[sel_name], new_name.strip()); st.success("Zmieniono nazwę."); st.rerun()
             else:
@@ -533,9 +525,9 @@ with st.sidebar.expander("Usuń kolumnę"):
     if col_opts2:
         del_name = st.selectbox("Kolumna do usunięcia", options=list(col_opts2.keys()), key="del_col_sel")
         others   = [(c.name, c.id) for c in b.columns if c.name != del_name]
-        tgt_name = st.selectbox("Przenieś zadania do…", options=["—"] + [n for n,_ in others], key="move_to_sel")
-        confirm  = st.checkbox("Potwierdzam usunięcie")
-        if st.button("🗑️ Usuń kolumnę", use_container_width=True, disabled=not confirm):
+        tgt_name = st.selectbox("Przenieś zadania do…", options=["—"] + [n for n,_ in others], key="move_tasks_to_sel")
+        confirm  = st.checkbox("Potwierdzam usunięcie", key="confirm_delete_column")
+        if st.button("🗑️ Usuń kolumnę", use_container_width=True, key="delete_column_btn", disabled=not confirm):
             move_to = dict(others).get(tgt_name) if tgt_name != "—" else None
             delete_column(col_opts2[del_name], move_to); st.rerun()
 
@@ -562,15 +554,15 @@ if st.session_state.get("show_add_modal"):
         col_map = {c.name: c.id for c in b.columns}
         with st.form("add_task_form_modal", clear_on_submit=True):
             c = st.columns(2)
-            add_title = c[0].text_input("Tytuł*", placeholder="Nazwa zadania")
-            add_prio  = c[1].selectbox("Priorytet", ["Low", "Med", "High"], index=1)
-            add_desc  = st.text_area("Opis", placeholder="Krótki opis…")
+            add_title = c[0].text_input("Tytuł*", placeholder="Nazwa zadania", key="add_title")
+            add_prio  = c[1].selectbox("Priorytet", ["Low", "Med", "High"], index=1, key="add_prio")
+            add_desc  = st.text_area("Opis", placeholder="Krótki opis…", key="add_desc")
             c2 = st.columns(2)
-            add_due_enabled = c2[0].checkbox("Ustaw termin")
-            add_due_val     = c2[0].date_input("Termin", value=date.today(), disabled=not add_due_enabled)
-            add_tags_txt    = c2[1].text_input("Tagi (rozdziel przecinkami)", placeholder="ops, ui, backend")
-            add_colname     = st.selectbox("Kolumna docelowa", options=list(col_map.keys()) if col_map else [])
-            submitted       = st.form_submit_button("Dodaj")
+            add_due_enabled = c2[0].checkbox("Ustaw termin", key="add_due_en")
+            add_due_val     = c2[0].date_input("Termin", value=date.today(), disabled=not add_due_enabled, key="add_due")
+            add_tags_txt    = c2[1].text_input("Tagi (rozdziel przecinkami)", placeholder="ops, ui, backend", key="add_tags")
+            add_colname     = st.selectbox("Kolumna docelowa", options=list(col_map.keys()) if col_map else [], key="add_col_sel")
+            submitted       = st.form_submit_button("Dodaj", use_container_width=True)
         if submitted:
             if not add_title or not add_title.strip():
                 st.error("Tytuł jest wymagany.")
@@ -584,7 +576,7 @@ if st.session_state.get("show_add_modal"):
                 add_task(col_map[add_colname], task)
                 st.session_state["show_add_modal"] = False
                 st.success("Dodano zadanie."); st.rerun()
-        if st.button("Anuluj", type="secondary"):
+        if st.button("Anuluj", type="secondary", key="cancel_add_btn"):
             st.session_state["show_add_modal"] = False; st.rerun()
 
 # ───────────────────────── Modal: Edytuj zadanie ───────────────────────── #
@@ -598,7 +590,7 @@ if st.session_state.get("show_edit_modal"):
                 if t: task_choices.append((f"{c.name}: {t.title}", tid))
         if not task_choices:
             st.info("Brak zadań do edycji.")
-            if st.button("Zamknij"):
+            if st.button("Zamknij", key="close_edit_no_tasks_btn"):
                 st.session_state["show_edit_modal"] = False; st.rerun()
         else:
             labels = [lbl for lbl,_ in task_choices]
@@ -612,19 +604,19 @@ if st.session_state.get("show_edit_modal"):
 
             with st.form("edit_task_form_modal", clear_on_submit=True):
                 c = st.columns(2)
-                etitle = c[0].text_input("Tytuł*", value=t.title)
-                eprio  = c[1].selectbox("Priorytet", ["Low","Med","High"], index=["Low","Med","High"].index(t.priority))
-                edesc  = st.text_area("Opis", value=t.desc)
+                etitle = c[0].text_input("Tytuł*", value=t.title, key="edit_title")
+                eprio  = c[1].selectbox("Priorytet", ["Low","Med","High"], index=["Low","Med","High"].index(t.priority), key="edit_prio")
+                edesc  = st.text_area("Opis", value=t.desc, key="edit_desc")
                 c2 = st.columns(2)
-                edue_en  = c2[0].checkbox("Ustaw termin", value=t.due is not None)
-                edue_val = c2[0].date_input("Termin", value=(t.due or date.today()), disabled=not edue_en)
-                etags    = c2[1].text_input("Tagi (rozdziel przecinkami)", value=", ".join(t.tags))
-                ecolname = st.selectbox("Kolumna", options=col_names, index=col_names.index(current_col_name))
-                save_btn = st.form_submit_button("Zapisz")
+                edue_en  = c2[0].checkbox("Ustaw termin", value=t.due is not None, key="edit_due_en")
+                edue_val = c2[0].date_input("Termin", value=(t.due or date.today()), disabled=not edue_en, key="edit_due")
+                etags    = c2[1].text_input("Tagi (rozdziel przecinkami)", value=", ".join(t.tags), key="edit_tags")
+                ecolname = st.selectbox("Kolumna", options=col_names, index=col_names.index(current_col_name), key="edit_col_sel")
+                save_btn = st.form_submit_button("Zapisz", use_container_width=True)
             cA, cB, cC = st.columns(3)
-            del_click  = cA.button("🗑️ Usuń", use_container_width=True)
-            done_click = cB.button("✅ Done/Undone", use_container_width=True)
-            cancel_btn = cC.button("Anuluj", type="secondary", use_container_width=True)
+            del_click  = cA.button("🗑️ Usuń", use_container_width=True, key="delete_task_btn")
+            done_click = cB.button("✅ Done/Undone", use_container_width=True, key="toggle_done_btn")
+            cancel_btn = cC.button("Anuluj", type="secondary", use_container_width=True, key="cancel_edit_btn")
 
             if save_btn:
                 if not etitle.strip():
@@ -693,4 +685,4 @@ if result is not None:
         if new_ids != col.task_ids: col.task_ids = new_ids; changed = True
     if changed: save_board(b2)
 
-st.caption("Projekty w sidebarze (z wyszukiwarką). Modale z overlayem. Import/Export działa per projekt. Supabase – jeśli skonfigurowano.")
+st.caption("Projekty z wyszukiwarką. Unikalne klucze przycisków. Modale z overlayem. Import/Export per projekt. Supabase – jeśli skonfigurowano.")
