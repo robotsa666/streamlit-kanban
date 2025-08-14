@@ -1,11 +1,12 @@
 # app.py — Kanban (Projekty + React UI + smooth DnD + Supabase + Modale Add/Edit)
-# Wersja: v5.4.1-projects-overlay-keys
-# - Projekty w sidebarze (lista + wyszukiwarka, dodaj/zmień nazwę/usuń)
-# - Unikalne key= dla WSZYSTKICH przycisków (fix StreamlitDuplicateElementId)
-# - Modale: natywny st.modal lub fallback overlay
+# Wersja: v5.4.2-projects-inline-modal
+# - FIX: zamiast pełnoekranowego overlay, bezpieczny fallback „inline panel” (nie blokuje strony)
+# - Natywne st.modal jeśli dostępne; w przeciwnym razie panel w treści
+# - Projekty (lista + wyszukiwarka + CRUD) w sidebarze
+# - Unikalne key= dla widżetów (brak konfliktów)
 # - DnD: streamlit-sortables
 # - Karty: 4 linie (tytuł, opis, data, Priorytet: X)
-# - Persistencja: Supabase (1 wiersz = 1 projekt); fallback w session_state
+# - Persistencja: Supabase (1 wiersz = 1 projekt) lub fallback w session_state
 
 from __future__ import annotations
 
@@ -18,50 +19,43 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from streamlit_sortables import sort_items
 from streamlit_elements import elements, mui
 
-BUILD_TAG = "v5.4.1-projects-overlay-keys"
+BUILD_TAG = "v5.4.2-projects-inline-modal"
 REV_KEY = "_view_rev"
 
-# ───────────────────────── Polyfill modala (z overlayem) ───────────────────────── #
+# ───────────────────────── Polyfill modala (INLINE) ───────────────────────── #
 def _modal(title: str, key: str | None = None):
-    """Natywny st.modal jeśli dostępny; inaczej pełnoekranowy overlay."""
+    """
+    • Jeśli jest st.modal (nowy Streamlit) → użyj go.
+    • W przeciwnym razie zwróć panel „inline” w treści strony (nie blokuje kliknięć).
+    """
     if getattr(st, "modal", None):
         try:
             return st.modal(title, key=key)
         except TypeError:
             return st.modal(title)
 
-    overlay_id = f"overlay-{(key or title).replace(' ', '-')}"
-
-    class _OverlayPanel:
+    class _InlinePanel:
         def __enter__(self):
             st.markdown(
-                f"""
-                <div id="{overlay_id}" style="
-                    position: fixed; inset: 0; z-index: 9999;
-                    background: rgba(0,0,0,.55);
-                    display: flex; align-items: flex-start; justify-content: center;
-                    padding: 8vh 16px 6vh;
+                """
+                <div style="
+                    margin: 12px auto 8px auto;
+                    max-width: 760px;
+                    padding: 16px 16px 2px 16px;
+                    border-radius: 12px;
+                    background: rgba(28,28,30,.95);
+                    border: 1px solid rgba(255,255,255,.08);
+                    box-shadow: 0 10px 30px rgba(0,0,0,.35);
                 ">
-                  <div style="
-                      width: min(760px, 96vw);
-                      background: var(--background-color, #111);
-                      color: var(--text-color, #fff);
-                      border: 1px solid rgba(255,255,255,.12);
-                      border-radius: 12px;
-                      box-shadow: 0 14px 40px rgba(0,0,0,.55);
-                      padding: 16px 16px 8px 16px;
-                  ">
-                    <div style="font-size: 1.15rem; font-weight: 700; margin: 0 0 8px 0;">{title}</div>
                 """,
                 unsafe_allow_html=True,
             )
+            st.markdown(f"#### {title}")
             return st.container()
-
         def __exit__(self, exc_type, exc, tb):
-            st.markdown("</div></div>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
             return False
-
-    return _OverlayPanel()
+    return _InlinePanel()
 
 # ───────────────────────── Supabase helpers ───────────────────────── #
 def _sb_table_name() -> str:
@@ -685,4 +679,4 @@ if result is not None:
         if new_ids != col.task_ids: col.task_ids = new_ids; changed = True
     if changed: save_board(b2)
 
-st.caption("Projekty z wyszukiwarką. Unikalne klucze przycisków. Modale z overlayem. Import/Export per projekt. Supabase – jeśli skonfigurowano.")
+st.caption("Projekty w sidebarze (z wyszukiwarką). Panel–modal inline (bez overlay). Import/Export per projekt. Supabase — jeśli skonfigurowano.")
