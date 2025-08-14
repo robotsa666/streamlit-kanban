@@ -1,9 +1,10 @@
 # app.py — Kanban (React UI + smooth DnD + Supabase + MODALE Add/Edit)
-# Wersja: v5.3.2-supabase-modals-compat
-# - Modale kompatybilne: _modal() używa st.modal -> st.dialog -> st.experimental_dialog -> fallback container
+# Wersja: v5.3.3-supabase-modals-fallback
+# - Modale: _modal() używa natywnego st.modal jeśli jest; w starszych wersjach Streamlit
+#   wyświetla „panel–modal” jako fallback (bez st.dialog).
 # - DnD: streamlit-sortables z kluczem REV (bez migania)
 # - Karty: 4 linie (tytuł, opis, data, Priorytet: X)
-# - Supabase persist + debug w sidebarze
+# - Supabase persist + podstawowy debug w sidebarze
 
 from __future__ import annotations
 
@@ -16,34 +17,45 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from streamlit_sortables import sort_items
 from streamlit_elements import elements, mui
 
-BUILD_TAG = "v5.3.2-supabase-modals-compat"
+BUILD_TAG = "v5.3.3-supabase-modals-fallback"
 REV_KEY = "_view_rev"
 
 # ───────────── Polyfill modala ───────────── #
 def _modal(title: str, key: str | None = None):
-    """Zwraca context manager na modal w zależności od wersji Streamlit."""
+    """
+    Zwraca context manager na modal:
+      • jeśli jest st.modal → używamy natywnego modala,
+      • w przeciwnym razie – „fallback panel” (ładne okno na stronie).
+    NIE używamy st.dialog / experimental_dialog (są dekoratorami, różne API).
+    """
     if getattr(st, "modal", None):
         try:
             return st.modal(title, key=key)
         except TypeError:
             return st.modal(title)
-    if getattr(st, "dialog", None):
-        try:
-            return st.dialog(title, key=key)
-        except TypeError:
-            return st.dialog(title)
-    if getattr(st, "experimental_dialog", None):
-        try:
-            return st.experimental_dialog(title, key=key)
-        except TypeError:
-            return st.experimental_dialog(title)
-    class _Dummy:
+
+    class _FallbackPanel:
         def __enter__(self):
-            st.markdown(f"### {title}")
+            st.markdown(
+                """
+                <div style="
+                    margin: 12px auto 8px auto;
+                    max-width: 760px;
+                    padding: 16px 16px 2px 16px;
+                    border-radius: 12px;
+                    background: rgba(28,28,30,.95);
+                    border: 1px solid rgba(255,255,255,.08);
+                    box-shadow: 0 10px 30px rgba(0,0,0,.45);
+                ">
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"#### {title}")
             return st.container()
         def __exit__(self, exc_type, exc, tb):
+            st.markdown("</div>", unsafe_allow_html=True)
             return False
-    return _Dummy()
+    return _FallbackPanel()
 
 # ───────────── Supabase helpers ───────────── #
 def _sb_table_name() -> str:
@@ -360,8 +372,7 @@ if st.session_state.get("show_add_modal"):
                             priority=add_prio, due=due, tags=tags)
                 add_task(col_map[add_colname], task)
                 st.session_state["show_add_modal"] = False
-                st.success("Dodano zadanie.")
-                st.rerun()
+                st.success("Dodano zadanie."); st.rerun()
         if st.button("Anuluj", type="secondary"):
             st.session_state["show_add_modal"] = False; st.rerun()
 
